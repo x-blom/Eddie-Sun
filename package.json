@@ -1,0 +1,67 @@
+{
+  "name": "eddie-sun",
+  "displayName": "Eddie Sun",
+  "description": "Highlights code based on Commit Hashes",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "commit-hash-highlighter.openSidebar",
+        "title": "Open Commit Hash Highlighter",
+        "category": "Commit Hash Highlighter",
+        "icon": "$(heart)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "commit-hash-highlighter-activitybar",
+          "title": "Commit Hash Highlighter",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "commit-hash-highlighter-activitybar": [
+        {
+          "id": "commit-hash-highlighter-sidebar",
+          "name": "Commit Hashes",
+          "type": "webview"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/glob": "^8.1.0",
+    "@types/mocha": "^10.0.1",
+    "@types/node": "lts",
+    "@vscode/test-electron": "^2.3.2",
+    "eslint": "^8.45.0",
+    "glob": "^8.1.0",
+    "mocha": "^10.2.0",
+    "typescript": "^5.1.6",
+    "@typescript-eslint/eslint-plugin": "^6.4.1",
+    "@typescript-eslint/parser": "^6.4.1",
+    "eslint-config-airbnb-base": "^15.0.0",
+    "eslint-plugin-import": "^2.28.0"
+  }
+}
