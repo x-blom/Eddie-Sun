@@ -89,23 +89,21 @@ export class GitBlameService {
    * (This method uses Git blame on a per-file basis.)
    */
   public async applyHighlighting(editor: vscode.TextEditor, commitHashes: string[]) {
-    const filePath = editor.document.uri.fsPath;
-    // Only run git blame if the file is associated with one of the commit hashes.
-    if (!this._highlightedFiles.has(filePath)) {
-      console.log(`Skipping git blame for ${filePath} as it is not associated with any commit hash`);
+    if (commitHashes.length === 0) {
       return;
     }
-    
+    const filePath = editor.document.uri.fsPath;
     console.log(`Processing file: ${filePath}`);
+
     try {
       const blameInfos = await this.getBlameInfoForFile(filePath);
       if (!blameInfos || blameInfos.length === 0) {
         console.log("No blame information found for this file");
         return;
       }
-    
+
       const decorationsArray: vscode.DecorationOptions[] = [];
-    
+
       for (const blameInfo of blameInfos) {
         if (commitHashes.includes(blameInfo.hash)) {
           console.log(`Found matching hash ${blameInfo.hash} with ${blameInfo.lines.length} lines`);
@@ -120,10 +118,12 @@ export class GitBlameService {
         }
       }
       console.log(`Applying ${decorationsArray.length} decorations`);
-    
+
+      // Apply decorations in the editor (both in the main view and minimap)
       editor.setDecorations(this._highlightDecorationType, decorationsArray);
       editor.setDecorations(this._minimapDecorationType, decorationsArray);
-    
+
+      // Update tracking: if any decorations were applied, mark the file as highlighted.
       if (decorationsArray.length > 0) {
         this._highlightedFiles.set(filePath, {
           uri: editor.document.uri,
@@ -132,7 +132,7 @@ export class GitBlameService {
       } else {
         this._highlightedFiles.delete(filePath);
       }
-    
+
       this._refreshFileExplorerDecorations();
     } catch (error) {
       console.error("Error applying highlighting:", error);
