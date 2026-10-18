@@ -3,6 +3,14 @@ import * as cp from 'child_process';
 import * as path from 'path';
 import * as util from 'util';
 
+const execFile = util.promisify(cp.execFile);
+
+// Run git without a shell, so hashes and file names are passed through untouched.
+async function git(args: string[], cwd: string): Promise<string> {
+  const { stdout } = await execFile('git', args, { cwd, maxBuffer: 64 * 1024 * 1024 });
+  return stdout;
+}
+
 // Interface for storing blame information
 interface BlameInfo {
   hash: string;
@@ -33,10 +41,15 @@ export const HIGHLIGHT_COLORS: [number, number, number][] = [
 
 export class GitBlameService {
   private _decorationTypes: Map<number, vscode.TextEditorDecorationType> = new Map();
-  private _blameCache: Map<string, BlameInfo[]> = new Map();
+  // Pending or finished blame lookups, so editors showing the same file share one git call.
+  private _blameCache: Map<string, Promise<BlameInfo[]>> = new Map();
   private _highlightedFiles: Map<string, HighlightedFileInfo> = new Map();
   // Files touched by the listed commits; these are shown in the Explorer without opening them.
   private _commitFiles: Map<string, HighlightedFileInfo> = new Map();
+  // Every highlighted file plus all of its parent folders, for constant-time Explorer lookups.
+  private _decoratedPaths: Set<string> = new Set();
+  // Bumped on every update/clear so a slow, outdated commit lookup can't overwrite newer results.
+  private _commitFilesGeneration = 0;
   private _fileDecorationProviderDisposable: vscode.Disposable | undefined;
   private _onDidChangeFileDecorations: vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>;
 
@@ -48,8 +61,7 @@ export class GitBlameService {
     this._fileDecorationProviderDisposable = vscode.window.registerFileDecorationProvider({
       onDidChangeFileDecorations: this._onDidChangeFileDecorations.event,
       provideFileDecoration: (uri: vscode.Uri): vscode.FileDecoration | undefined => {
-        const fileKey = uri.fsPath;
-        if (this._isFileOrChildHighlighted(fileKey)) {
+        if (this._decoratedPaths.has(uri.fsPath)) {
           return new vscode.FileDecoration(
             'H', // badge (optional)
             'Contains highlighted commit code', // tooltip
@@ -88,29 +100,12 @@ export class GitBlameService {
     }
   }
 
-  // Check if the file (or any child file in a directory) is highlighted
-  private _isFileOrChildHighlighted(fsPath: string): boolean {
-    if (fsPath.endsWith(path.sep)) {
-      fsPath = fsPath.slice(0, -1);
-    }
-    for (const files of [this._highlightedFiles, this._commitFiles]) {
-      if (files.has(fsPath)) {
-        return true;
-      }
-      for (const filePath of files.keys()) {
-        if (filePath.startsWith(fsPath + path.sep)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-  
   // Clean up resources
   public dispose() {
     if (this._fileDecorationProviderDisposable) {
       this._fileDecorationProviderDisposable.dispose();
     }
+    this._onDidChangeFileDecorations.dispose();
     for (const decorationType of this._decorationTypes.values()) {
       decorationType.dispose();
     }
@@ -122,7 +117,8 @@ export class GitBlameService {
    * (This method uses Git blame on a per-file basis.)
    */
   public async applyHighlighting(editor: vscode.TextEditor, commitHashes: string[]) {
-    if (commitHashes.length === 0) {
+    // Only real files on disk can be blamed (skips untitled documents, output panels, etc.)
+    if (commitHashes.length === 0 || editor.document.uri.scheme !== 'file') {
       return;
     }
     const filePath = editor.document.uri.fsPath;
@@ -130,9 +126,8 @@ export class GitBlameService {
 
     try {
       const blameInfos = await this.getBlameInfoForFile(filePath);
-      if (!blameInfos || blameInfos.length === 0) {
+      if (blameInfos.length === 0) {
         console.log("No blame information found for this file");
-        return;
       }
 
       // Group the decorations by the commit's position in the list, so each commit gets its own colour.
@@ -180,23 +175,13 @@ export class GitBlameService {
   }
 
   /**
-   * Clear highlighting from a specific editor.
-   */
-  public clearHighlighting(editor: vscode.TextEditor) {
-    console.log("Clearing all highlighting decorations");
-    this._clearEditorDecorations(editor);
-    const filePath = editor.document.uri.fsPath;
-    this._highlightedFiles.delete(filePath);
-    this._refreshFileExplorerDecorations();
-  }
-  
-  /**
    * Clear highlights from all visible editors.
    */
   public clearAllHighlights() {
     vscode.window.visibleTextEditors.forEach(editor => this._clearEditorDecorations(editor));
     this._highlightedFiles.clear();
     this._commitFiles.clear();
+    this._commitFilesGeneration++;
     this._refreshFileExplorerDecorations();
   }
   
@@ -204,6 +189,22 @@ export class GitBlameService {
    * Trigger a refresh of file explorer decorations.
    */
   private _refreshFileExplorerDecorations() {
+    const decoratedPaths = new Set<string>();
+    for (const files of [this._highlightedFiles, this._commitFiles]) {
+      for (const filePath of files.keys()) {
+        // Walk up to the root, stopping early once a folder is already recorded.
+        let current = filePath;
+        while (!decoratedPaths.has(current)) {
+          decoratedPaths.add(current);
+          const parent = path.dirname(current);
+          if (parent === current) {
+            break;
+          }
+          current = parent;
+        }
+      }
+    }
+    this._decoratedPaths = decoratedPaths;
     this._onDidChangeFileDecorations.fire(undefined);
   }
 
@@ -215,21 +216,18 @@ export class GitBlameService {
   }
 
   /**
-   * Clear all cached blame information.
-   */
-  public clearAllBlameCache() {
-    this._blameCache.clear();
-  }
-
-  /**
    * Get blame information for a file using Git.
    */
-  private async getBlameInfoForFile(filePath: string): Promise<BlameInfo[]> {
-    if (this._blameCache.has(filePath)) {
-      console.log("Using cached blame info");
-      return this._blameCache.get(filePath) || [];
+  private getBlameInfoForFile(filePath: string): Promise<BlameInfo[]> {
+    let blame = this._blameCache.get(filePath);
+    if (!blame) {
+      blame = this._runBlame(filePath);
+      this._blameCache.set(filePath, blame);
     }
+    return blame;
+  }
 
+  private async _runBlame(filePath: string): Promise<BlameInfo[]> {
     console.log("Getting blame info from Git");
     try {
       const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(filePath));
@@ -238,39 +236,27 @@ export class GitBlameService {
         return [];
       }
       const relativePath = path.relative(workspaceFolder.uri.fsPath, filePath);
-      const execPromise = util.promisify(cp.exec);
-      const { stdout } = await execPromise(
-        `git blame -l "${relativePath}"`,
-        { cwd: workspaceFolder.uri.fsPath }
-      );
+      // -s drops author/date columns; --root stops root-commit lines being marked as boundary (^hash).
+      const stdout = await git(['blame', '-l', '-s', '--root', '--', relativePath], workspaceFolder.uri.fsPath);
 
-      const blameInfo: BlameInfo[] = [];
-      const blameLines = stdout.split('\n');
       const hashMap = new Map<string, number[]>();
-
+      const blameLines = stdout.split('\n');
       for (let i = 0; i < blameLines.length; i++) {
-        const line = blameLines[i];
-        if (!line || line.trim() === '') {
-          continue;
-        }
-        const match = line.match(/^(\w+)/);
-        if (match && match[1]) {
-          const hash = match[1];
-          const shortHash = hash.substring(0, 40);
-          if (!hashMap.has(shortHash)) {
-            hashMap.set(shortHash, []);
+        const match = blameLines[i].match(/^(\w+)/);
+        if (match) {
+          const lines = hashMap.get(match[1]);
+          if (lines) {
+            lines.push(i);
+          } else {
+            hashMap.set(match[1], [i]);
           }
-          hashMap.get(shortHash)?.push(i);
         }
       }
 
-      hashMap.forEach((lines, hash) => {
-        blameInfo.push({ hash, lines });
-      });
-
-      this._blameCache.set(filePath, blameInfo);
-      return blameInfo;
+      return Array.from(hashMap, ([hash, lines]) => ({ hash, lines }));
     } catch (error) {
+      // Don't cache failures, so the next attempt retries.
+      this._blameCache.delete(filePath);
       console.error(`Error getting blame info: ${error}`);
       vscode.window.showErrorMessage(`Failed to get Git blame info: ${error}`);
       return [];
@@ -283,12 +269,8 @@ export class GitBlameService {
    * Get the list of files changed in a specific commit.
    */
   private async getFilesForCommit(commit: string, cwd: string): Promise<string[]> {
-    const execPromise = util.promisify(cp.exec);
     try {
-      const { stdout } = await execPromise(
-        `git diff-tree --root --relative --no-commit-id --name-only -r ${commit}`,
-        { cwd }
-      );
+      const stdout = await git(['diff-tree', '--root', '--relative', '--no-commit-id', '--name-only', '-r', commit], cwd);
       return stdout.split('\n').filter(line => line.trim().length > 0);
     } catch (error) {
       console.error(`Error getting files for commit ${commit}:`, error);
@@ -307,30 +289,34 @@ export class GitBlameService {
       return;
     }
     const workspacePath = workspaceFolders[0].uri.fsPath;
-    // Build into a fresh map so overlapping calls can't interleave, then swap it in.
+    const generation = ++this._commitFilesGeneration;
+    // Build into a fresh map, then swap it in.
     const commitFiles = new Map<string, HighlightedFileInfo>();
 
-    for (const identifier of commitIdentifiers) {
+    // Look up all commits in parallel.
+    const fileLists = await Promise.all(commitIdentifiers.map(async identifier => {
       let commit = identifier;
       // If the identifier looks like a Change-Id (e.g., starts with 'I'), try to resolve it
       if (identifier.startsWith('I')) {
         const resolved = await this.resolveChangeId(identifier, workspacePath);
-        if (resolved) {
-          commit = resolved;
-        } else {
+        if (!resolved) {
           console.warn(`Could not resolve Change-Id: ${identifier}`);
-          continue; // Skip if it cannot be resolved
+          return []; // Skip if it cannot be resolved
         }
+        commit = resolved;
       }
+      return this.getFilesForCommit(commit, workspacePath);
+    }));
 
-      const files = await this.getFilesForCommit(commit, workspacePath);
-      for (const file of files) {
-        const absolutePath = path.join(workspacePath, file);
-        commitFiles.set(absolutePath, {
-          uri: vscode.Uri.file(absolutePath),
-          highlightCount: 1
-        });
-      }
+    for (const file of fileLists.flat()) {
+      const absolutePath = path.join(workspacePath, file);
+      commitFiles.set(absolutePath, {
+        uri: vscode.Uri.file(absolutePath),
+        highlightCount: 1
+      });
+    }
+    if (generation !== this._commitFilesGeneration) {
+      return;
     }
     this._commitFiles = commitFiles;
     // Notify VS Code to update Explorer decorations
@@ -339,12 +325,8 @@ export class GitBlameService {
   
   private async resolveChangeId(changeId: string, cwd: string): Promise<string | null> {
     // Use git log to resolve a Change-Id to a commit hash.
-    const execPromise = util.promisify(cp.exec);
     try {
-      const { stdout } = await execPromise(
-        `git log --grep="Change-Id: ${changeId}" --format="%H" -n 1`,
-        { cwd }
-      );
+      const stdout = await git(['log', '--fixed-strings', `--grep=Change-Id: ${changeId}`, '--format=%H', '-n', '1'], cwd);
       const commitHash = stdout.trim();
       return commitHash.length > 0 ? commitHash : null;
     } catch (error) {

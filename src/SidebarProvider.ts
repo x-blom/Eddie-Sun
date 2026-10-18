@@ -6,28 +6,27 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   private _commitHashes: string[] = [];
   private _isHighlightingEnabled: boolean = false;
   private _gitBlameService: GitBlameService;
+  private _disposables: vscode.Disposable[] = [];
 
   constructor(private readonly _extensionUri: vscode.Uri) {
     this._gitBlameService = new GitBlameService();
 
-    // Listen to active editor changes
-    vscode.window.onDidChangeActiveTextEditor(editor => {
-      if (editor && this._isHighlightingEnabled) {
-        console.log("Active editor changed - attempting to highlight");
+    // Highlight editors as they come into view (opening, switching tabs, splitting)
+    this._disposables.push(vscode.window.onDidChangeVisibleTextEditors(() => {
+      if (this._isHighlightingEnabled) {
         this.triggerHighlighting();
       }
-    });
+    }));
 
-    // Listen to document changes to update highlighting
-    vscode.workspace.onDidChangeTextDocument(event => {
-      const activeEditor = vscode.window.activeTextEditor;
-      if (activeEditor && event.document === activeEditor.document && this._isHighlightingEnabled) {
-        console.log("Document changed - re-applying highlighting");
-        const filePath = activeEditor.document.uri.fsPath;
-        this._gitBlameService.clearBlameCache(filePath);
+    // Re-run blame when a file is saved. While typing, VS Code shifts the existing
+    // decorations along with the text, so there's no need to call git on every keystroke.
+    this._disposables.push(vscode.workspace.onDidSaveTextDocument(document => {
+      if (this._isHighlightingEnabled) {
+        console.log("Document saved - re-applying highlighting");
+        this._gitBlameService.clearBlameCache(document.uri.fsPath);
         this.triggerHighlighting();
       }
-    });
+    }));
   }
 
   public resolveWebviewView(
@@ -52,7 +51,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (JSON.stringify(this._commitHashes) !== JSON.stringify(newHashes)) {
             this._commitHashes = newHashes;
             console.log(`Current hashes: ${this._commitHashes.join(', ')}`);
-            this._gitBlameService.clearAllBlameCache();
             if (this._isHighlightingEnabled && this._commitHashes.length > 0) {
               console.log("Highlighting enabled - updating files for commits");
               // Fetch and mark files changed by these commits.
@@ -323,41 +321,17 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   }
 
   private triggerHighlighting() {
-    this.highlightActiveEditor();
-    this.highlightAllVisibleEditors();
-  }
-  
-  private highlightActiveEditor() {
-    const activeEditor = vscode.window.activeTextEditor;
-    if (activeEditor) {
-      console.log("Triggering highlighting in active editor");
-      this._gitBlameService.clearHighlighting(activeEditor);
-      if (this._isHighlightingEnabled && this._commitHashes.length > 0) {
-        console.log(`Applying highlighting for ${this._commitHashes.length} hashes`);
-        this._gitBlameService.applyHighlighting(activeEditor, this._commitHashes);
-      } else {
-        console.log(`Highlighting not applied: enabled=${this._isHighlightingEnabled}, hashes=${this._commitHashes.length}`);
-      }
-    } else {
-      console.log("No active editor found for highlighting");
-    }
-  }
-  
-  private highlightAllVisibleEditors() {
     if (!this._isHighlightingEnabled || this._commitHashes.length === 0) {
       return;
     }
-    
-    vscode.window.visibleTextEditors.forEach(editor => {
-      if (editor === vscode.window.activeTextEditor) {
-        return;
-      }
-      this._gitBlameService.clearHighlighting(editor);
+    // applyHighlighting replaces an editor's old decorations itself, so no separate clear (and flicker) is needed.
+    for (const editor of vscode.window.visibleTextEditors) {
       this._gitBlameService.applyHighlighting(editor, this._commitHashes);
-    });
+    }
   }
 
   public dispose() {
+    this._disposables.forEach(disposable => disposable.dispose());
     this._gitBlameService.dispose();
   }
 }

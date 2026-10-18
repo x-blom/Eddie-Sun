@@ -18,7 +18,7 @@ suite('GitBlameService Test Suite', () => {
     // Create a dummy editor with a minimal document and stubbed lineAt method.
     const dummyEditor: Partial<vscode.TextEditor> = {
       document: {
-        uri: { fsPath: filePath } as vscode.Uri,
+        uri: vscode.Uri.file(filePath),
         lineAt: (line: number) => {
           // Create a dummy range for the line.
           return { range: new vscode.Range(line, 0, line, 10) } as vscode.TextLine;
@@ -50,7 +50,7 @@ suite('GitBlameService Test Suite', () => {
     // Create a dummy editor with a minimal document and stubbed lineAt method.
     const dummyEditor: Partial<vscode.TextEditor> = {
       document: {
-        uri: { fsPath: filePath } as vscode.Uri,
+        uri: vscode.Uri.file(filePath),
         lineAt: (line: number) => {
           return { range: new vscode.Range(line, 0, line, 10) } as vscode.TextLine;
         }
@@ -77,7 +77,7 @@ suite('GitBlameService Test Suite', () => {
     const applied = new Map<vscode.TextEditorDecorationType, number>();
     const dummyEditor = {
       document: {
-        uri: { fsPath: '/dummy/file.ts' } as vscode.Uri,
+        uri: vscode.Uri.file('/dummy/file.ts'),
         lineAt: (line: number) => ({ range: new vscode.Range(line, 0, line, 10) })
       },
       setDecorations: (type: vscode.TextEditorDecorationType, decorations: vscode.DecorationOptions[]) => {
