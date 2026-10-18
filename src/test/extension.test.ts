@@ -4,14 +4,10 @@ import { GitBlameService } from '../GitBlameService'; // Adjust the path as need
 
 suite('GitBlameService Test Suite', () => {
   
-  test('applyHighlighting should skip git blame if file is not highlighted', async () => {
+  test('applyHighlighting should skip git blame if there are no commit hashes', async () => {
     const service = new GitBlameService();
-    const serviceAny = service as any; // cast to any to access private properties
     const filePath = '/dummy/file.ts';
 
-    // Ensure that _highlightedFiles does not contain filePath
-    serviceAny._highlightedFiles.delete(filePath);
-    
     let blameCalled = false;
     // Monkey-patch getBlameInfoForFile to track its invocation
     service['getBlameInfoForFile'] = async (path: string) => {
@@ -33,24 +29,17 @@ suite('GitBlameService Test Suite', () => {
       }
     };
 
-    // Call applyHighlighting with a dummy commit hash.
-    await service.applyHighlighting(dummyEditor as vscode.TextEditor, ['dummyHash']);
+    // Call applyHighlighting with no commit hashes.
+    await service.applyHighlighting(dummyEditor as vscode.TextEditor, []);
 
-    // Since the file wasn't marked as highlighted, getBlameInfoForFile should not have been called.
+    // Since there is nothing to highlight, getBlameInfoForFile should not have been called.
     assert.strictEqual(blameCalled, false);
   });
 
-  test('applyHighlighting should call git blame when file is highlighted', async () => {
+  test('applyHighlighting should call git blame when there are commit hashes', async () => {
     const service = new GitBlameService();
-    const serviceAny = service as any; // cast to any to access private properties
     const filePath = '/dummy/file.ts';
 
-    // Mark the file as highlighted by manually adding it to _highlightedFiles.
-    serviceAny._highlightedFiles.set(filePath, {
-      uri: vscode.Uri.file(filePath),
-      highlightCount: 1
-    });
-    
     let blameCalled = false;
     // Monkey-patch getBlameInfoForFile to track its invocation.
     service['getBlameInfoForFile'] = async (path: string) => {
@@ -74,7 +63,7 @@ suite('GitBlameService Test Suite', () => {
     // Call applyHighlighting with a dummy commit hash.
     await service.applyHighlighting(dummyEditor as vscode.TextEditor, ['dummyHash']);
 
-    // Since the file is marked as highlighted, getBlameInfoForFile should be called.
+    // Since there is a hash to highlight, getBlameInfoForFile should be called.
     assert.strictEqual(blameCalled, true);
   });
 });
