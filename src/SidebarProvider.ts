@@ -220,25 +220,6 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       }, 400);
     }
 
-    toggleHighlightButton.addEventListener('click', toggleHighlight);
-    commitHashesTextarea.addEventListener('input', () => {
-      renderLegend();
-      scheduleHashUpdate();
-    });
-
-    // While highlighting is on, send edited hashes to the extension shortly after typing stops.
-    let hashUpdateTimer;
-    function scheduleHashUpdate() {
-      clearTimeout(hashUpdateTimer);
-      if (highlightStatusSpan.textContent !== 'ON') {
-        return;
-      }
-      hashUpdateTimer = setTimeout(() => {
-        const hashes = parseCommitHashes(commitHashesTextarea.value);
-        vscode.postMessage({ type: 'updateCommitHashes', value: hashes });
-        vscode.setState({ commitHashes: hashes, isHighlightingEnabled: true });
-      }, 400);
-    }
     renderLegend();
 
     // Show the highlight colour used for each hash, in the same order the extension assigns them.
