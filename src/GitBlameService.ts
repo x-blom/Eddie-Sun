@@ -35,6 +35,8 @@ export class GitBlameService {
   private _decorationTypes: Map<number, vscode.TextEditorDecorationType> = new Map();
   private _blameCache: Map<string, BlameInfo[]> = new Map();
   private _highlightedFiles: Map<string, HighlightedFileInfo> = new Map();
+  // Files touched by the listed commits; these are shown in the Explorer without opening them.
+  private _commitFiles: Map<string, HighlightedFileInfo> = new Map();
   private _fileDecorationProviderDisposable: vscode.Disposable | undefined;
   private _onDidChangeFileDecorations: vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>;
 
@@ -88,15 +90,17 @@ export class GitBlameService {
 
   // Check if the file (or any child file in a directory) is highlighted
   private _isFileOrChildHighlighted(fsPath: string): boolean {
-    if (this._highlightedFiles.has(fsPath)) {
-      return true;
-    }
     if (fsPath.endsWith(path.sep)) {
       fsPath = fsPath.slice(0, -1);
     }
-    for (const filePath of this._highlightedFiles.keys()) {
-      if (filePath.startsWith(fsPath + path.sep)) {
+    for (const files of [this._highlightedFiles, this._commitFiles]) {
+      if (files.has(fsPath)) {
         return true;
+      }
+      for (const filePath of files.keys()) {
+        if (filePath.startsWith(fsPath + path.sep)) {
+          return true;
+        }
       }
     }
     return false;
@@ -192,6 +196,7 @@ export class GitBlameService {
   public clearAllHighlights() {
     vscode.window.visibleTextEditors.forEach(editor => this._clearEditorDecorations(editor));
     this._highlightedFiles.clear();
+    this._commitFiles.clear();
     this._refreshFileExplorerDecorations();
   }
   
@@ -281,7 +286,7 @@ export class GitBlameService {
     const execPromise = util.promisify(cp.exec);
     try {
       const { stdout } = await execPromise(
-        `git diff-tree --no-commit-id --name-only -r ${commit}`,
+        `git diff-tree --root --relative --no-commit-id --name-only -r ${commit}`,
         { cwd }
       );
       return stdout.split('\n').filter(line => line.trim().length > 0);
@@ -297,14 +302,14 @@ export class GitBlameService {
    * so that the Explorer decorations update automatically.
    */
   public async updateFilesForCommits(commitIdentifiers: string[]): Promise<void> {
-    // Clear previous highlighted files
-    this._highlightedFiles.clear();
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
       return;
     }
     const workspacePath = workspaceFolders[0].uri.fsPath;
-  
+    // Build into a fresh map so overlapping calls can't interleave, then swap it in.
+    const commitFiles = new Map<string, HighlightedFileInfo>();
+
     for (const identifier of commitIdentifiers) {
       let commit = identifier;
       // If the identifier looks like a Change-Id (e.g., starts with 'I'), try to resolve it
@@ -317,16 +322,17 @@ export class GitBlameService {
           continue; // Skip if it cannot be resolved
         }
       }
-  
+
       const files = await this.getFilesForCommit(commit, workspacePath);
       for (const file of files) {
         const absolutePath = path.join(workspacePath, file);
-        this._highlightedFiles.set(absolutePath, {
+        commitFiles.set(absolutePath, {
           uri: vscode.Uri.file(absolutePath),
           highlightCount: 1
         });
       }
     }
+    this._commitFiles = commitFiles;
     // Notify VS Code to update Explorer decorations
     this._refreshFileExplorerDecorations();
   }
