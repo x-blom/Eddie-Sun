@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vm from 'vm';
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { SidebarProvider } from '../SidebarProvider';
 
 type Listener = (event?: any) => void;
@@ -133,6 +134,34 @@ suite('Sidebar webview script', () => {
     assert.strictEqual(webview.elements.legend.children.length, 1);
   });
 
+  test('shows what the extension found for each hash', () => {
+    const webview = runWebviewScript();
+    webview.type('abc123\ndef456\nghi789\njkl012');
+    webview.receive({
+      type: 'commitStatus',
+      value: [
+        { hash: 'abc123', status: 'ok', lines: 12 },
+        { hash: 'def456', status: 'ok', lines: 1 },
+        { hash: 'ghi789', status: 'gone', lines: 0 },
+        { hash: 'jkl012', status: 'unknown', lines: 0 }
+      ]
+    });
+    const items = webview.elements.legend.children;
+    const status = (i: number) => items[i].children[2].textContent;
+    assert.deepStrictEqual([0, 1, 2, 3].map(status), ['12 lines', '1 line', 'no code left', 'not found']);
+    assert.deepStrictEqual(items.map(item => item.className.includes('no-match')), [false, false, true, true]);
+  });
+
+  test('status is dropped for a hash that was edited', () => {
+    const webview = runWebviewScript();
+    webview.type('abc123');
+    webview.receive({ type: 'commitStatus', value: [{ hash: 'abc123', status: 'gone', lines: 0 }] });
+    webview.type('abc124');
+    const [item] = webview.elements.legend.children;
+    assert.strictEqual(item.children.length, 2);
+    assert.ok(!item.className.includes('no-match'));
+  });
+
   test('restores saved hashes and hands them to the extension', () => {
     const webview = runWebviewScript({ commitHashes: ['abc123', 'def456'], isHighlightingEnabled: true });
     assert.strictEqual(webview.elements.commitHashesTextarea.value, 'abc123\ndef456');
@@ -188,6 +217,42 @@ suite('Sidebar in a real webview', function () {
       assert.deepStrictEqual(await firstMessage, { type: 'viewStateRestored' });
     } finally {
       panel.dispose();
+      provider.dispose();
+    }
+  });
+});
+
+suite('Sidebar provider', function () {
+  this.timeout(20000);
+
+  test('reports which listed commits still have code, without highlighting on', async () => {
+    const fixture = JSON.parse(fs.readFileSync(process.env.EDDIE_FIXTURE!, 'utf8'));
+    const provider = new SidebarProvider(vscode.Uri.file('/ext'));
+    const posted: any[] = [];
+    let receive: (message: unknown) => void = () => undefined;
+    provider.resolveWebviewView({
+      webview: {
+        options: {},
+        html: '',
+        cspSource: 'test',
+        postMessage: (message: unknown) => { posted.push(message); return Promise.resolve(true); },
+        onDidReceiveMessage: (listener: (message: unknown) => void) => { receive = listener; return { dispose() {} }; }
+      }
+    } as unknown as vscode.WebviewView, {} as vscode.WebviewViewResolveContext, {} as vscode.CancellationToken);
+
+    try {
+      receive({ type: 'updateCommitHashes', value: [fixture.third, fixture.fourth, 'deadbeef'] });
+      while (!posted.some(message => message.type === 'commitStatus')) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      const status = posted.find(message => message.type === 'commitStatus');
+      assert.deepStrictEqual(status.value.map((m: any) => m.status), ['gone', 'ok', 'unknown']);
+
+      // A webview that is recreated asks for its state and gets the statuses again.
+      posted.length = 0;
+      receive({ type: 'viewStateRestored' });
+      assert.ok(posted.some(message => message.type === 'commitStatus' && message.value.length === 3));
+    } finally {
       provider.dispose();
     }
   });

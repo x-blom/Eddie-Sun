@@ -23,8 +23,19 @@ function createFixtureRepo(): { repo: string; fixtureFile: string } {
   git('commit', '-q', '-m', 'second\n\nChange-Id: Iabc123');
   const second = git('rev-parse', 'HEAD');
 
+  // A file that is created and then completely rewritten, so the commit that created it has no code left.
+  fs.writeFileSync(path.join(repo, 'c.txt'), 'old\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'third');
+  const third = git('rev-parse', 'HEAD');
+
+  fs.writeFileSync(path.join(repo, 'c.txt'), 'new\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'fourth');
+  const fourth = git('rev-parse', 'HEAD');
+
   const fixtureFile = path.join(repo, '..', `${path.basename(repo)}.json`);
-  fs.writeFileSync(fixtureFile, JSON.stringify({ repo, first, second }));
+  fs.writeFileSync(fixtureFile, JSON.stringify({ repo, first, second, third, fourth }));
   return { repo, fixtureFile };
 }
 

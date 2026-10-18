@@ -1,11 +1,13 @@
 import * as vscode from 'vscode';
-import { GitBlameService, HIGHLIGHT_COLORS } from './GitBlameService';
+import { CommitMatch, GitBlameService, HIGHLIGHT_COLORS } from './GitBlameService';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
   private _commitHashes: string[] = [];
   private _isHighlightingEnabled: boolean = false;
   private _gitBlameService: GitBlameService;
+  private _commitMatches: CommitMatch[] = [];
+  private _matchGeneration = 0;
   private _disposables: vscode.Disposable[] = [];
 
   constructor(private readonly _extensionUri: vscode.Uri) {
@@ -53,14 +55,12 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
             console.log(`Current hashes: ${this._commitHashes.join(', ')}`);
             if (this._isHighlightingEnabled) {
               if (this._commitHashes.length > 0) {
-                console.log("Highlighting enabled - updating files for commits");
-                // Fetch and mark files changed by these commits.
-                this._gitBlameService.updateFilesForCommits(this._commitHashes);
                 this.triggerHighlighting();
               } else {
                 this._gitBlameService.clearAllHighlights();
               }
             }
+            this.refreshCommitMatches();
           }
           this.saveState();
           break;
@@ -69,10 +69,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           this._isHighlightingEnabled = data.value;
           console.log(`Highlighting toggled to: ${this._isHighlightingEnabled}`);
           if (this._isHighlightingEnabled) {
-            if (this._commitHashes.length > 0) {
-              console.log("Highlighting enabled - updating files for commits");
-              this._gitBlameService.updateFilesForCommits(this._commitHashes);
-            }
+            this.refreshCommitMatches();
             this.triggerHighlighting();
           } else {
             this._gitBlameService.clearAllHighlights();
@@ -151,6 +148,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       height: 12px;
       border-radius: 2px;
     }
+    .legend-item.no-match .swatch {
+      opacity: 0.35;
+    }
+    .legend-status {
+      margin-left: auto;
+      color: #9d9d9d;
+    }
+    .legend-item.no-match .legend-status {
+      color: #e5a50a;
+    }
     .help-text {
       font-size: 12px;
       color: #9d9d9d;
@@ -185,6 +192,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const highlightStatusSpan = document.getElementById('highlightStatus');
     const legend = document.getElementById('legend');
     const palette = ${JSON.stringify(HIGHLIGHT_COLORS)};
+    // What the extension found for each hash: { hash, status: 'ok' | 'gone' | 'unknown', lines }
+    let matches = {};
     
     // Restore stored state from the webview if available
     const storedState = vscode.getState() || { commitHashes: [], isHighlightingEnabled: false };
@@ -235,6 +244,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         const label = document.createElement('span');
         label.textContent = hash;
         item.append(swatch, label);
+        const match = matches[hash];
+        if (match) {
+          const status = document.createElement('span');
+          status.className = 'legend-status';
+          if (match.status === 'ok') {
+            status.textContent = match.lines + (match.lines === 1 ? ' line' : ' lines');
+          } else {
+            item.className += ' no-match';
+            status.textContent = match.status === 'gone' ? 'no code left' : 'not found';
+            item.title = match.status === 'gone'
+              ? 'None of this commit\\'s lines are in the current code'
+              : 'No such commit in this repository';
+          }
+          item.append(status);
+        }
         legend.append(item);
       });
     }
@@ -284,6 +308,13 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         case 'updateHighlightStatus':
           highlightStatusSpan.textContent = message.value ? 'ON' : 'OFF';
           break;
+        case 'commitStatus':
+          matches = {};
+          for (const match of message.value) {
+            matches[match.hash] = match;
+          }
+          renderLegend();
+          break;
         case 'restoreState':
           // Don't overwrite what the user is typing right now.
           if (message.commitHashes && message.commitHashes.length > 0 && document.activeElement !== commitHashesTextarea) {
@@ -322,6 +353,30 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  /**
+   * Check which listed commits still have code in the current files and tell the webview.
+   * While highlighting is on this also marks the touched files in the Explorer.
+   */
+  private async refreshCommitMatches() {
+    const generation = ++this._matchGeneration;
+    const hashes = this._commitHashes;
+    const matches = hashes.length === 0
+      ? []
+      : this._isHighlightingEnabled
+        ? await this._gitBlameService.updateFilesForCommits(hashes)
+        : (await this._gitBlameService.analyzeCommits(hashes)).matches;
+    // Skip results made outdated by a newer edit.
+    if (!matches || generation !== this._matchGeneration) {
+      return;
+    }
+    this._commitMatches = matches;
+    this._postCommitMatches();
+  }
+
+  private _postCommitMatches() {
+    this._view?.webview.postMessage({ type: 'commitStatus', value: this._commitMatches });
+  }
+
   private saveState() {
     if (this._view) {
       this._view.webview.postMessage({
@@ -340,6 +395,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
         commitHashes: this._commitHashes,
         isHighlightingEnabled: this._isHighlightingEnabled
       });
+      this._postCommitMatches();
       console.log("Restored state to webview");
     }
   }

@@ -17,6 +17,46 @@ interface BlameInfo {
   lines: number[];
 }
 
+// Whether a listed commit still has code in the current files:
+// ok = some of its lines survive, gone = none do, unknown = git can't find the commit.
+export interface CommitMatch {
+  hash: string;
+  status: 'ok' | 'gone' | 'unknown';
+  lines: number;
+}
+
+// Map each commit hash in `git blame -l` output to the (0-based) lines it is responsible for.
+function parseBlame(stdout: string): Map<string, number[]> {
+  const hashMap = new Map<string, number[]>();
+  const blameLines = stdout.split('\n');
+  for (let i = 0; i < blameLines.length; i++) {
+    const match = blameLines[i].match(/^(\w+)/);
+    if (match) {
+      const lines = hashMap.get(match[1]);
+      if (lines) {
+        lines.push(i);
+      } else {
+        hashMap.set(match[1], [i]);
+      }
+    }
+  }
+  return hashMap;
+}
+
+// Run `task` on every item with at most `limit` running at once.
+async function mapWithLimit<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await task(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
 // One RGB colour per commit; commits beyond the palette size wrap around.
 export const HIGHLIGHT_COLORS: [number, number, number][] = [
   [255, 193, 7],
@@ -217,19 +257,7 @@ export class GitBlameService {
       // -s drops author/date columns; --root stops root-commit lines being marked as boundary (^hash).
       const stdout = await git(['blame', '-l', '-s', '--root', '--', relativePath], workspaceFolder.uri.fsPath);
 
-      const hashMap = new Map<string, number[]>();
-      const blameLines = stdout.split('\n');
-      for (let i = 0; i < blameLines.length; i++) {
-        const match = blameLines[i].match(/^(\w+)/);
-        if (match) {
-          const lines = hashMap.get(match[1]);
-          if (lines) {
-            lines.push(i);
-          } else {
-            hashMap.set(match[1], [i]);
-          }
-        }
-      }
+      const hashMap = parseBlame(stdout);
 
       return Array.from(hashMap, ([hash, lines]) => ({ hash, lines }));
     } catch (error) {
@@ -257,46 +285,86 @@ export class GitBlameService {
   }
 
   /**
-   * Update highlighted files based on a list of commit hashes.
-   * This method queries Git for each commit's changed files and marks them as highlighted,
-   * so that the Explorer decorations update automatically.
+   * Resolve a hash, abbreviation or Change-Id to a full commit hash, or null if git doesn't know it.
    */
-  public async updateFilesForCommits(commitIdentifiers: string[]): Promise<void> {
+  private async resolveCommit(identifier: string, cwd: string): Promise<string | null> {
+    let commit = identifier;
+    // If the identifier looks like a Change-Id (e.g., starts with 'I'), try to resolve it
+    if (identifier.startsWith('I')) {
+      const resolved = await this.resolveChangeId(identifier, cwd);
+      if (!resolved) {
+        console.warn(`Could not resolve Change-Id: ${identifier}`);
+        return null;
+      }
+      commit = resolved;
+    }
+    try {
+      const stdout = await git(['rev-parse', '--verify', '--quiet', '--end-of-options', `${commit}^{commit}`], cwd);
+      return stdout.trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Look up each listed commit: the files it touched, and how many of its lines are still
+   * in the current version of those files.
+   */
+  public async analyzeCommits(commitIdentifiers: string[]): Promise<{ matches: CommitMatch[]; files: Set<string> }> {
     const workspaceFolders = vscode.workspace.workspaceFolders;
     if (!workspaceFolders || workspaceFolders.length === 0) {
-      return;
+      return {
+        matches: commitIdentifiers.map(hash => ({ hash, status: 'unknown', lines: 0 })),
+        files: new Set()
+      };
     }
     const workspacePath = workspaceFolders[0].uri.fsPath;
-    const generation = ++this._commitFilesGeneration;
-    // Build into a fresh map, then swap it in.
-    const commitFiles = new Set<string>();
 
     // Look up all commits in parallel.
-    const fileLists = await Promise.all(commitIdentifiers.map(async identifier => {
-      let commit = identifier;
-      // If the identifier looks like a Change-Id (e.g., starts with 'I'), try to resolve it
-      if (identifier.startsWith('I')) {
-        const resolved = await this.resolveChangeId(identifier, workspacePath);
-        if (!resolved) {
-          console.warn(`Could not resolve Change-Id: ${identifier}`);
-          return []; // Skip if it cannot be resolved
-        }
-        commit = resolved;
-      }
-      return this.getFilesForCommit(commit, workspacePath);
+    const commits = await Promise.all(commitIdentifiers.map(async identifier => {
+      const commit = await this.resolveCommit(identifier, workspacePath);
+      const files = commit ? await this.getFilesForCommit(commit, workspacePath) : [];
+      return { identifier, commit, files };
     }));
 
-    for (const file of fileLists.flat()) {
-      commitFiles.add(path.join(workspacePath, file));
-    }
+    // Blame every touched file once (a few at a time), and count each commit's surviving lines.
+    const allFiles = [...new Set(commits.flatMap(c => c.files))];
+    const blamedFiles = await mapWithLimit(allFiles, 4, async file => {
+      try {
+        return parseBlame(await git(['blame', '-l', '-s', '--root', '--', file], workspacePath));
+      } catch {
+        return new Map<string, number[]>(); // e.g. the file was deleted or renamed since
+      }
+    });
+    const blameByFile = new Map(allFiles.map((file, i) => [file, blamedFiles[i]]));
+
+    const matches = commits.map(({ identifier, commit, files }): CommitMatch => {
+      if (!commit) {
+        return { hash: identifier, status: 'unknown', lines: 0 };
+      }
+      const lines = files.reduce((sum, file) => sum + (blameByFile.get(file)?.get(commit)?.length ?? 0), 0);
+      return { hash: identifier, status: lines > 0 ? 'ok' : 'gone', lines };
+    });
+    return { matches, files: new Set(allFiles.map(file => path.join(workspacePath, file))) };
+  }
+
+  /**
+   * Update the Explorer markers based on a list of commit hashes: every file the commits
+   * touched is marked. Returns the match status of each commit, or undefined if a newer
+   * update or a clear made these results outdated.
+   */
+  public async updateFilesForCommits(commitIdentifiers: string[]): Promise<CommitMatch[] | undefined> {
+    const generation = ++this._commitFilesGeneration;
+    const { matches, files } = await this.analyzeCommits(commitIdentifiers);
     if (generation !== this._commitFilesGeneration) {
-      return;
+      return undefined;
     }
-    this._commitFiles = commitFiles;
+    this._commitFiles = files;
     // Notify VS Code to update Explorer decorations
     this._refreshFileExplorerDecorations();
+    return matches;
   }
-  
+
   private async resolveChangeId(changeId: string, cwd: string): Promise<string | null> {
     // Use git log to resolve a Change-Id to a commit hash.
     try {

@@ -8,6 +8,8 @@ interface Fixture {
   repo: string;
   first: string;
   second: string;
+  third: string;
+  fourth: string;
 }
 
 type Applied = Map<vscode.TextEditorDecorationType, vscode.DecorationOptions[]>;
@@ -210,6 +212,45 @@ suite('GitBlameService git integration', function () {
     await service.applyHighlighting(editor, [fixture.second]);
     await service.updateFilesForCommits([]);
     assert.strictEqual(service['_decoratedPaths'].size, 0);
+  });
+
+  test('analyzeCommits counts the lines each commit still owns', async () => {
+    const { matches } = await service.analyzeCommits([fixture.first, fixture.second]);
+    // first: "one" and "three" in a.txt; second: "TWO" in a.txt plus b.txt's only line.
+    assert.deepStrictEqual(matches, [
+      { hash: fixture.first, status: 'ok', lines: 2 },
+      { hash: fixture.second, status: 'ok', lines: 2 }
+    ]);
+  });
+
+  test('analyzeCommits reports commits whose code is all gone', async () => {
+    const { matches } = await service.analyzeCommits([fixture.third, fixture.fourth]);
+    assert.deepStrictEqual(matches, [
+      { hash: fixture.third, status: 'gone', lines: 0 },
+      { hash: fixture.fourth, status: 'ok', lines: 1 }
+    ]);
+  });
+
+  test('analyzeCommits reports unknown commits and keeps the input text', async () => {
+    const { matches } = await service.analyzeCommits(['deadbeefdeadbeef', 'Inotthere', fixture.second.slice(0, 7), '--help']);
+    assert.deepStrictEqual(matches, [
+      { hash: 'deadbeefdeadbeef', status: 'unknown', lines: 0 },
+      { hash: 'Inotthere', status: 'unknown', lines: 0 },
+      { hash: fixture.second.slice(0, 7), status: 'ok', lines: 2 },
+      { hash: '--help', status: 'unknown', lines: 0 }
+    ]);
+  });
+
+  test('analyzeCommits resolves Change-Ids', async () => {
+    const { matches } = await service.analyzeCommits(['Iabc123']);
+    assert.deepStrictEqual(matches, [{ hash: 'Iabc123', status: 'ok', lines: 2 }]);
+  });
+
+  test('updateFilesForCommits returns the matches, but nothing when outdated', async () => {
+    const outdated = service.updateFilesForCommits([fixture.first]);
+    const current = await service.updateFilesForCommits([fixture.second]);
+    assert.strictEqual(await outdated, undefined);
+    assert.strictEqual(current?.[0].status, 'ok');
   });
 
   test('clearAllHighlights removes Explorer markers and editor decorations', async () => {
