@@ -17,12 +17,6 @@ interface BlameInfo {
   lines: number[];
 }
 
-// Interface for tracking highlighted files
-interface HighlightedFileInfo {
-  uri: vscode.Uri;
-  highlightCount: number;
-}
-
 // One RGB colour per commit; commits beyond the palette size wrap around.
 export const HIGHLIGHT_COLORS: [number, number, number][] = [
   [255, 193, 7],
@@ -43,10 +37,9 @@ export class GitBlameService {
   private _decorationTypes: Map<number, vscode.TextEditorDecorationType> = new Map();
   // Pending or finished blame lookups, so editors showing the same file share one git call.
   private _blameCache: Map<string, Promise<BlameInfo[]>> = new Map();
-  private _highlightedFiles: Map<string, HighlightedFileInfo> = new Map();
   // Files touched by the listed commits; these are shown in the Explorer without opening them.
-  private _commitFiles: Map<string, HighlightedFileInfo> = new Map();
-  // Every highlighted file plus all of its parent folders, for constant-time Explorer lookups.
+  private _commitFiles: Set<string> = new Set();
+  // Every touched file plus all of its parent folders, for constant-time Explorer lookups.
   private _decoratedPaths: Set<string> = new Set();
   // Bumped on every update/clear so a slow, outdated commit lookup can't overwrite newer results.
   private _commitFilesGeneration = 0;
@@ -156,18 +149,6 @@ export class GitBlameService {
       for (const [colorIndex, decorations] of decorationsByColor) {
         editor.setDecorations(this._getDecorationType(colorIndex), decorations);
       }
-
-      // Update tracking: if any decorations were applied, mark the file as highlighted.
-      if (decorationCount > 0) {
-        this._highlightedFiles.set(filePath, {
-          uri: editor.document.uri,
-          highlightCount: decorationCount
-        });
-      } else {
-        this._highlightedFiles.delete(filePath);
-      }
-
-      this._refreshFileExplorerDecorations();
     } catch (error) {
       console.error("Error applying highlighting:", error);
       vscode.window.showErrorMessage(`Error applying highlighting: ${error}`);
@@ -179,7 +160,6 @@ export class GitBlameService {
    */
   public clearAllHighlights() {
     vscode.window.visibleTextEditors.forEach(editor => this._clearEditorDecorations(editor));
-    this._highlightedFiles.clear();
     this._commitFiles.clear();
     this._commitFilesGeneration++;
     this._refreshFileExplorerDecorations();
@@ -190,18 +170,16 @@ export class GitBlameService {
    */
   private _refreshFileExplorerDecorations() {
     const decoratedPaths = new Set<string>();
-    for (const files of [this._highlightedFiles, this._commitFiles]) {
-      for (const filePath of files.keys()) {
-        // Walk up to the root, stopping early once a folder is already recorded.
-        let current = filePath;
-        while (!decoratedPaths.has(current)) {
-          decoratedPaths.add(current);
-          const parent = path.dirname(current);
-          if (parent === current) {
-            break;
-          }
-          current = parent;
+    for (const filePath of this._commitFiles) {
+      // Walk up to the root, stopping early once a folder is already recorded.
+      let current = filePath;
+      while (!decoratedPaths.has(current)) {
+        decoratedPaths.add(current);
+        const parent = path.dirname(current);
+        if (parent === current) {
+          break;
         }
+        current = parent;
       }
     }
     this._decoratedPaths = decoratedPaths;
@@ -291,7 +269,7 @@ export class GitBlameService {
     const workspacePath = workspaceFolders[0].uri.fsPath;
     const generation = ++this._commitFilesGeneration;
     // Build into a fresh map, then swap it in.
-    const commitFiles = new Map<string, HighlightedFileInfo>();
+    const commitFiles = new Set<string>();
 
     // Look up all commits in parallel.
     const fileLists = await Promise.all(commitIdentifiers.map(async identifier => {
@@ -309,11 +287,7 @@ export class GitBlameService {
     }));
 
     for (const file of fileLists.flat()) {
-      const absolutePath = path.join(workspacePath, file);
-      commitFiles.set(absolutePath, {
-        uri: vscode.Uri.file(absolutePath),
-        highlightCount: 1
-      });
+      commitFiles.add(path.join(workspacePath, file));
     }
     if (generation !== this._commitFilesGeneration) {
       return;

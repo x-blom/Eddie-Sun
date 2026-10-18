@@ -162,11 +162,11 @@ suite('GitBlameService git integration', function () {
 
   test('updateFilesForCommits lists the files each commit touched', async () => {
     await service.updateFilesForCommits([fixture.second]);
-    const files = [...service['_commitFiles'].keys()].map(f => path.relative(fixture.repo, f)).sort();
+    const files = [...service['_commitFiles']].map(f => path.relative(fixture.repo, f)).sort();
     assert.deepStrictEqual(files, ['a.txt', 'b.txt']);
 
     await service.updateFilesForCommits([fixture.first]);
-    const firstFiles = [...service['_commitFiles'].keys()].map(f => path.relative(fixture.repo, f)).sort();
+    const firstFiles = [...service['_commitFiles']].map(f => path.relative(fixture.repo, f)).sort();
     assert.deepStrictEqual(firstFiles, ['a.txt']);
   });
 
@@ -195,12 +195,28 @@ suite('GitBlameService git integration', function () {
     assert.strictEqual(service['_commitFiles'].size, 2);
   });
 
+  test('removing a commit removes its files from the Explorer markers', async () => {
+    await service.updateFilesForCommits([fixture.first, fixture.second]);
+    assert.ok(service['_decoratedPaths'].has(path.join(fixture.repo, 'b.txt')));
+
+    // Only the first commit remains: b.txt (added by the second) is no longer marked.
+    await service.updateFilesForCommits([fixture.first]);
+    assert.ok(service['_decoratedPaths'].has(path.join(fixture.repo, 'a.txt')));
+    assert.ok(!service['_decoratedPaths'].has(path.join(fixture.repo, 'b.txt')));
+  });
+
+  test('highlighting an editor does not leave Explorer markers behind', async () => {
+    await service.updateFilesForCommits([fixture.first]);
+    await service.applyHighlighting(editor, [fixture.second]);
+    await service.updateFilesForCommits([]);
+    assert.strictEqual(service['_decoratedPaths'].size, 0);
+  });
+
   test('clearAllHighlights removes Explorer markers and editor decorations', async () => {
     await service.updateFilesForCommits([fixture.second]);
     await service.applyHighlighting(editor, [fixture.second]);
     service.clearAllHighlights();
     assert.strictEqual(service['_commitFiles'].size, 0);
-    assert.strictEqual(service['_highlightedFiles'].size, 0);
     assert.strictEqual(service['_decoratedPaths'].size, 0);
   });
 
