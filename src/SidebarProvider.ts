@@ -51,13 +51,16 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (JSON.stringify(this._commitHashes) !== JSON.stringify(newHashes)) {
             this._commitHashes = newHashes;
             console.log(`Current hashes: ${this._commitHashes.join(', ')}`);
-            if (this._isHighlightingEnabled && this._commitHashes.length > 0) {
-              console.log("Highlighting enabled - updating files for commits");
-              // Fetch and mark files changed by these commits.
-              this._gitBlameService.updateFilesForCommits(this._commitHashes);
-              this.triggerHighlighting();
+            if (this._isHighlightingEnabled) {
+              if (this._commitHashes.length > 0) {
+                console.log("Highlighting enabled - updating files for commits");
+                // Fetch and mark files changed by these commits.
+                this._gitBlameService.updateFilesForCommits(this._commitHashes);
+                this.triggerHighlighting();
+              } else {
+                this._gitBlameService.clearAllHighlights();
+              }
             }
-            vscode.window.showInformationMessage(`Updated commit hashes (${newHashes.length})`);
           }
           this.saveState();
           break;
@@ -164,7 +167,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <h1>Commit Hash Highlighter</h1>
   <div class="help-text">
     Enter commit hashes below, one per line. 
-    Click "highligh on" to start highlighting code from these commits.
+    Click the button to start highlighting code from these commits. While it is on, changes to the list apply automatically.
   </div>
   
   <textarea id="commitHashesTextarea" placeholder="Enter commit hashes here, one per line"></textarea>
@@ -196,7 +199,24 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'viewStateRestored' });
     
     toggleHighlightButton.addEventListener('click', toggleHighlight);
-    commitHashesTextarea.addEventListener('input', renderLegend);
+    commitHashesTextarea.addEventListener('input', () => {
+      renderLegend();
+      scheduleHashUpdate();
+    });
+
+    // While highlighting is on, send edited hashes to the extension shortly after typing stops.
+    let hashUpdateTimer;
+    function scheduleHashUpdate() {
+      clearTimeout(hashUpdateTimer);
+      if (highlightStatusSpan.textContent !== 'ON') {
+        return;
+      }
+      hashUpdateTimer = setTimeout(() => {
+        const hashes = parseCommitHashes(commitHashesTextarea.value);
+        vscode.postMessage({ type: 'updateCommitHashes', value: hashes });
+        vscode.setState({ commitHashes: hashes, isHighlightingEnabled: true });
+      }, 400);
+    }
     renderLegend();
 
     // Show the highlight colour used for each hash, in the same order the extension assigns them.
@@ -262,7 +282,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           highlightStatusSpan.textContent = message.value ? 'ON' : 'OFF';
           break;
         case 'restoreState':
-          if (message.commitHashes && message.commitHashes.length > 0) {
+          // Don't overwrite what the user is typing right now.
+          if (message.commitHashes && message.commitHashes.length > 0 && document.activeElement !== commitHashesTextarea) {
             commitHashesTextarea.value = message.commitHashes.join('\\n');
           }
           renderLegend();
