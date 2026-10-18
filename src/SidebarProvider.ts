@@ -167,7 +167,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   <h1>Commit Hash Highlighter</h1>
   <div class="help-text">
     Enter commit hashes below, one per line. 
-    Click the button to start highlighting code from these commits. While it is on, changes to the list apply automatically.
+    Click the button to start highlighting code from these commits. Changes to the list are saved and, while highlighting is on, applied automatically.
   </div>
   
   <textarea id="commitHashesTextarea" placeholder="Enter commit hashes here, one per line"></textarea>
@@ -195,9 +195,31 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       highlightStatusSpan.textContent = 'ON';
     }
     
+    // Hand any locally saved hashes to the extension first, in case the last edit was never sent.
+    if (storedState.commitHashes && storedState.commitHashes.length > 0) {
+      vscode.postMessage({ type: 'updateCommitHashes', value: storedState.commitHashes });
+    }
+
     // Request state restoration from the extension
     vscode.postMessage({ type: 'viewStateRestored' });
     
+    toggleHighlightButton.addEventListener('click', toggleHighlight);
+    commitHashesTextarea.addEventListener('input', () => {
+      renderLegend();
+      scheduleHashUpdate();
+    });
+
+    // Save edited hashes right away (even with highlighting off) so they survive switching views.
+    let hashUpdateTimer;
+    function scheduleHashUpdate() {
+      const hashes = parseCommitHashes(commitHashesTextarea.value);
+      vscode.setState({ commitHashes: hashes, isHighlightingEnabled: highlightStatusSpan.textContent === 'ON' });
+      clearTimeout(hashUpdateTimer);
+      hashUpdateTimer = setTimeout(() => {
+        vscode.postMessage({ type: 'updateCommitHashes', value: hashes });
+      }, 400);
+    }
+
     toggleHighlightButton.addEventListener('click', toggleHighlight);
     commitHashesTextarea.addEventListener('input', () => {
       renderLegend();
