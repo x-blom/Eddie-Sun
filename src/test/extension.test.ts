@@ -66,4 +66,30 @@ suite('GitBlameService Test Suite', () => {
     // Since there is a hash to highlight, getBlameInfoForFile should be called.
     assert.strictEqual(blameCalled, true);
   });
+
+  test('applyHighlighting should give each commit its own decoration type', async () => {
+    const service = new GitBlameService();
+    service['getBlameInfoForFile'] = async () => [
+      { hash: 'a'.repeat(40), lines: [0, 1] },
+      { hash: 'b'.repeat(40), lines: [2] }
+    ];
+
+    const applied = new Map<vscode.TextEditorDecorationType, number>();
+    const dummyEditor = {
+      document: {
+        uri: { fsPath: '/dummy/file.ts' } as vscode.Uri,
+        lineAt: (line: number) => ({ range: new vscode.Range(line, 0, line, 10) })
+      },
+      setDecorations: (type: vscode.TextEditorDecorationType, decorations: vscode.DecorationOptions[]) => {
+        applied.set(type, decorations.length);
+      }
+    };
+
+    // Short hashes should match the full blame hashes by prefix.
+    await service.applyHighlighting(dummyEditor as unknown as vscode.TextEditor, ['aaaa', 'bbbb']);
+
+    const nonEmpty = [...applied.values()].filter(count => count > 0).sort();
+    assert.deepStrictEqual(nonEmpty, [1, 2]);
+    service.dispose();
+  });
 });

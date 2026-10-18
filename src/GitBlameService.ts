@@ -15,32 +15,30 @@ interface HighlightedFileInfo {
   highlightCount: number;
 }
 
+// One RGB colour per commit; commits beyond the palette size wrap around.
+const HIGHLIGHT_COLORS: [number, number, number][] = [
+  [255, 193, 7],
+  [33, 150, 243],
+  [76, 175, 80],
+  [233, 30, 99],
+  [156, 39, 176],
+  [255, 87, 34],
+  [0, 188, 212],
+  [139, 195, 74],
+  [121, 85, 72],
+  [63, 81, 181],
+  [255, 235, 59],
+  [244, 67, 54]
+];
+
 export class GitBlameService {
-  private _highlightDecorationType: vscode.TextEditorDecorationType;
-  private _minimapDecorationType: vscode.TextEditorDecorationType;
+  private _decorationTypes: Map<number, vscode.TextEditorDecorationType> = new Map();
   private _blameCache: Map<string, BlameInfo[]> = new Map();
   private _highlightedFiles: Map<string, HighlightedFileInfo> = new Map();
   private _fileDecorationProviderDisposable: vscode.Disposable | undefined;
   private _onDidChangeFileDecorations: vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>;
 
   constructor() {
-    // Decoration style for the editor text (with a transparent yellow highlight)
-    this._highlightDecorationType = vscode.window.createTextEditorDecorationType({
-      backgroundColor: 'rgba(255, 215, 0, 0.2)',
-      borderWidth: '1px',
-      borderStyle: 'solid',
-      borderColor: 'rgba(255, 165, 0, 0.4)',
-      isWholeLine: true
-    });
-    
-    // Decoration style for the minimap/scrollbar
-    this._minimapDecorationType = vscode.window.createTextEditorDecorationType({
-      isWholeLine: true,
-      backgroundColor: 'rgba(255, 215, 0, 0.4)',
-      overviewRulerColor: 'rgba(255, 165, 0, 0.6)',
-      overviewRulerLane: vscode.OverviewRulerLane.Right
-    });
-    
     // Create an event emitter for file decoration changes
     this._onDidChangeFileDecorations = new vscode.EventEmitter<vscode.Uri | vscode.Uri[] | undefined>();
 
@@ -59,6 +57,33 @@ export class GitBlameService {
         return undefined;
       }
     });
+  }
+
+  // Get (or lazily create) the decoration type for a commit's colour slot.
+  private _getDecorationType(colorIndex: number): vscode.TextEditorDecorationType {
+    const slot = colorIndex % HIGHLIGHT_COLORS.length;
+    let decorationType = this._decorationTypes.get(slot);
+    if (!decorationType) {
+      const [r, g, b] = HIGHLIGHT_COLORS[slot];
+      decorationType = vscode.window.createTextEditorDecorationType({
+        backgroundColor: `rgba(${r}, ${g}, ${b}, 0.25)`,
+        borderWidth: '1px',
+        borderStyle: 'solid',
+        borderColor: `rgba(${r}, ${g}, ${b}, 0.5)`,
+        overviewRulerColor: `rgba(${r}, ${g}, ${b}, 0.8)`,
+        overviewRulerLane: vscode.OverviewRulerLane.Right,
+        isWholeLine: true
+      });
+      this._decorationTypes.set(slot, decorationType);
+    }
+    return decorationType;
+  }
+
+  // Remove every commit colour from an editor.
+  private _clearEditorDecorations(editor: vscode.TextEditor) {
+    for (const decorationType of this._decorationTypes.values()) {
+      editor.setDecorations(decorationType, []);
+    }
   }
 
   // Check if the file (or any child file in a directory) is highlighted
@@ -82,6 +107,10 @@ export class GitBlameService {
     if (this._fileDecorationProviderDisposable) {
       this._fileDecorationProviderDisposable.dispose();
     }
+    for (const decorationType of this._decorationTypes.values()) {
+      decorationType.dispose();
+    }
+    this._decorationTypes.clear();
   }
 
   /**
@@ -102,32 +131,38 @@ export class GitBlameService {
         return;
       }
 
-      const decorationsArray: vscode.DecorationOptions[] = [];
+      // Group the decorations by the commit's position in the list, so each commit gets its own colour.
+      const decorationsByColor = new Map<number, vscode.DecorationOptions[]>();
+      let decorationCount = 0;
 
       for (const blameInfo of blameInfos) {
-        if (commitHashes.includes(blameInfo.hash)) {
-          console.log(`Found matching hash ${blameInfo.hash} with ${blameInfo.lines.length} lines`);
-          for (const lineNumber of blameInfo.lines) {
-            const line = editor.document.lineAt(lineNumber);
-            const decoration = {
-              range: line.range,
-              hoverMessage: `Commit: ${blameInfo.hash}`
-            };
-            decorationsArray.push(decoration);
-          }
+        const colorIndex = commitHashes.findIndex(hash => blameInfo.hash.startsWith(hash));
+        if (colorIndex === -1) {
+          continue;
         }
+        console.log(`Found matching hash ${blameInfo.hash} with ${blameInfo.lines.length} lines`);
+        const decorations = decorationsByColor.get(colorIndex) ?? [];
+        for (const lineNumber of blameInfo.lines) {
+          decorations.push({
+            range: editor.document.lineAt(lineNumber).range,
+            hoverMessage: `Commit: ${blameInfo.hash}`
+          });
+        }
+        decorationCount += decorations.length;
+        decorationsByColor.set(colorIndex, decorations);
       }
-      console.log(`Applying ${decorationsArray.length} decorations`);
+      console.log(`Applying ${decorationCount} decorations`);
 
-      // Apply decorations in the editor (both in the main view and minimap)
-      editor.setDecorations(this._highlightDecorationType, decorationsArray);
-      editor.setDecorations(this._minimapDecorationType, decorationsArray);
+      this._clearEditorDecorations(editor);
+      for (const [colorIndex, decorations] of decorationsByColor) {
+        editor.setDecorations(this._getDecorationType(colorIndex), decorations);
+      }
 
       // Update tracking: if any decorations were applied, mark the file as highlighted.
-      if (decorationsArray.length > 0) {
+      if (decorationCount > 0) {
         this._highlightedFiles.set(filePath, {
           uri: editor.document.uri,
-          highlightCount: decorationsArray.length
+          highlightCount: decorationCount
         });
       } else {
         this._highlightedFiles.delete(filePath);
@@ -145,8 +180,7 @@ export class GitBlameService {
    */
   public clearHighlighting(editor: vscode.TextEditor) {
     console.log("Clearing all highlighting decorations");
-    editor.setDecorations(this._highlightDecorationType, []);
-    editor.setDecorations(this._minimapDecorationType, []);
+    this._clearEditorDecorations(editor);
     const filePath = editor.document.uri.fsPath;
     this._highlightedFiles.delete(filePath);
     this._refreshFileExplorerDecorations();
@@ -156,10 +190,7 @@ export class GitBlameService {
    * Clear highlights from all visible editors.
    */
   public clearAllHighlights() {
-    vscode.window.visibleTextEditors.forEach(editor => {
-      editor.setDecorations(this._highlightDecorationType, []);
-      editor.setDecorations(this._minimapDecorationType, []);
-    });
+    vscode.window.visibleTextEditors.forEach(editor => this._clearEditorDecorations(editor));
     this._highlightedFiles.clear();
     this._refreshFileExplorerDecorations();
   }
