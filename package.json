@@ -2,7 +2,7 @@
   "name": "eddie-sun",
   "displayName": "Eddie Sun",
   "description": "Highlights code based on Commit Hashes",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "publisher": "x-blom",
   "engines": {
     "vscode": "^1.100.0"
