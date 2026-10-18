@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { GitBlameService } from './GitBlameService';
+import { GitBlameService, HIGHLIGHT_COLORS } from './GitBlameService';
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
   private _view?: vscode.WebviewView;
@@ -133,6 +133,23 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
       color: #d4d4d4;
       border: 1px solid #3c3c3c;
     }
+    .legend {
+      margin-bottom: 10px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-family: monospace;
+      font-size: 12px;
+      margin: 3px 0;
+    }
+    .swatch {
+      flex: none;
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
     .help-text {
       font-size: 12px;
       color: #9d9d9d;
@@ -154,6 +171,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
   
   <textarea id="commitHashesTextarea" placeholder="Enter commit hashes here, one per line"></textarea>
   
+  <div class="legend" id="legend"></div>
+
   <div>
     <button id="toggleHighlightButton">Highlighting: <span id="highlightStatus">OFF</span></button>
   </div>
@@ -163,6 +182,8 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     const commitHashesTextarea = document.getElementById('commitHashesTextarea');
     const toggleHighlightButton = document.getElementById('toggleHighlightButton');
     const highlightStatusSpan = document.getElementById('highlightStatus');
+    const legend = document.getElementById('legend');
+    const palette = ${JSON.stringify(HIGHLIGHT_COLORS)};
     
     // Restore stored state from the webview if available
     const storedState = vscode.getState() || { commitHashes: [], isHighlightingEnabled: false };
@@ -177,6 +198,25 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
     vscode.postMessage({ type: 'viewStateRestored' });
     
     toggleHighlightButton.addEventListener('click', toggleHighlight);
+    commitHashesTextarea.addEventListener('input', renderLegend);
+    renderLegend();
+
+    // Show the highlight colour used for each hash, in the same order the extension assigns them.
+    function renderLegend() {
+      legend.textContent = '';
+      parseCommitHashes(commitHashesTextarea.value).forEach((hash, index) => {
+        const [r, g, b] = palette[index % palette.length];
+        const item = document.createElement('div');
+        item.className = 'legend-item';
+        const swatch = document.createElement('span');
+        swatch.className = 'swatch';
+        swatch.style.backgroundColor = 'rgb(' + r + ', ' + g + ', ' + b + ')';
+        const label = document.createElement('span');
+        label.textContent = hash;
+        item.append(swatch, label);
+        legend.append(item);
+      });
+    }
     
     function toggleHighlight() {
       const hashesText = commitHashesTextarea.value;
@@ -227,6 +267,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
           if (message.commitHashes && message.commitHashes.length > 0) {
             commitHashesTextarea.value = message.commitHashes.join('\\n');
           }
+          renderLegend();
           highlightStatusSpan.textContent = message.isHighlightingEnabled ? 'ON' : 'OFF';
           vscode.setState({
             commitHashes: message.commitHashes || [],
@@ -238,6 +279,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 
     function updateCommitHashesTextarea(hashes) {
       commitHashesTextarea.value = hashes.join('\\n');
+      renderLegend();
       const currentState = vscode.getState() || {};
       vscode.setState({
         ...currentState,

@@ -16,7 +16,7 @@ interface HighlightedFileInfo {
 }
 
 // One RGB colour per commit; commits beyond the palette size wrap around.
-const HIGHLIGHT_COLORS: [number, number, number][] = [
+export const HIGHLIGHT_COLORS: [number, number, number][] = [
   [255, 193, 7],
   [33, 150, 243],
   [76, 175, 80],
